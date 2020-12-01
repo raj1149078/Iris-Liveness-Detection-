@@ -1,0 +1,188 @@
+import os
+import numpy as np
+import pandas as pd
+from tqdm import tqdm
+from joblib import load, dump
+from scipy.signal import butter, filtfilt, lfilter
+
+PATH = '/content/drive/MyDrive/ETPAD.v2/'
+LIVE = 'LIVE EYE MOVEMENTS/'
+SAS_I = 'SAS_I EYE MOVEMENTS/'
+SAS_II = 'SAS_II EYE MOVEMENTS/'
+
+class FeatureExtraction:
+
+    """
+                        ----------- FEATURE EXTRACTION CLASS ------------
+
+            Required params:
+                - path      : Path to the dataset folder
+                - folder    : Name of the data folder. e.g. 'LIVE EYE MOVEMENTS/',
+                             'SAS_I EYE MOVEMENTS/' etc.
+                - label     : For live data label = 1 and for spoof label = 0   //according to dataset it is vice versa
+            Optional params:
+                - unit_size : size of a single unit. Must be able to divide 1500 
+                              with no remainder. 
+                - take_size : 1500 (FIXED FOR THIS DATASET)
+    """
+
+    def __init__(self, path, folder, label, unit_size = 15000, take_size=15000): #####Tuning
+        self.path = path
+        self.unit_size = unit_size
+        self.folder = folder
+        self.label = label
+        self.take_size = take_size
+
+    @staticmethod
+    def get_local_unit_centroid(u, M):
+        return np.sum(u, axis=1) / M
+
+    @staticmethod
+    def get_local_unit_power(u, M):
+        return np.sum(u ** 2, axis=1) / M
+
+    @staticmethod
+    def get_local_unit_variance(u, LUC, M):
+        return np.sum(np.subtract(u, LUC.reshape(-1, 1)) ** 2, axis=1) / M
+
+    @staticmethod
+    def get_local_unit_snr(LUC, LUV):
+        LUV[LUV == 0] = 0.0000001
+        return np.divide(LUC, np.sqrt(LUV))
+
+    @staticmethod
+    def get_local_unit_invalidity(validity, M):
+        return np.sum(validity, axis=1) / M
+
+    @staticmethod
+    def get_filtered_data(data, cut_off=5, fs=1000):
+        b, a = butter(N=4, Wn=cut_off, btype='low', fs=fs)
+        return filtfilt(b, a, data)
+     
+    def load_file(self, filename):
+        data = pd.read_csv(self.path + self.folder + filename, 
+                           delim_whitespace=True, skiprows=1, header=None)
+        data.columns = ['sample', 'x', 'y', 'validity']
+        return data
+
+    def extract(self):
+        features = np.empty((1, 19))
+
+        # ------ GET ALL FILENAMES IN THE FOLDER ------
+        file_names = os.listdir(self.path + self.folder)
+
+        # -------- ITERATE THROUGH ALL THE FILES ----------- 
+        for file in tqdm(file_names, desc="EXTRACTING... "):
+            data = self.load_file(file)
+
+            # ------------ APPLY FILTER ----------
+            f = np.gradient(data)
+            print(f)
+
+            x = self.get_filtered_data(data['x'].to_numpy()) \
+                    .reshape(-1, self.unit_size)
+            y = self.get_filtered_data(data['y'].to_numpy()) \
+                    .reshape(-1, self.unit_size)
+            # y = data['x'].to_numpy().reshape(-1, self.unit_size)
+            # x = data['x'].to_numpy().reshape(-1, self.unit_size)
+            validity = data['validity'].to_numpy().reshape(-1, self.unit_size)
+
+            # --------------- UNIT FEATURES --------------
+            LUCx = self.get_local_unit_centroid(x, self.unit_size)
+            LUCy = self.get_local_unit_centroid(y, self.unit_size)
+            LUPx = self.get_local_unit_power(x, self.unit_size)
+            LUPy = self.get_local_unit_power(y, self.unit_size)
+            LUVx = self.get_local_unit_variance(x, LUCx, self.unit_size)
+            LUVy = self.get_local_unit_variance(y, LUCy, self.unit_size)
+            LUSx = self.get_local_unit_snr(LUCx, LUVx)
+            LUSy = self.get_local_unit_snr(LUCy, LUVy)
+            LUI = self.get_local_unit_invalidity(validity, self.unit_size)
+
+            # --------- COMBINE EVERYTHING --------------
+            temp = np.stack([LUCx, LUCy, LUPx, LUPy, LUVx, 
+                             LUVy, LUSx, LUSy, LUI], axis=1)
+            
+            # ----------- AVERAGE AND STD -------------
+            f_avg = np.mean(temp, axis=0).reshape(1, -1)
+            f_std = np.std(temp, axis=0).reshape(1, -1)
+
+            # ------ FINAL FEATURE VECTOR INCLUDING LABEL (400x19) ----------
+            f_final = np.concatenate([f_avg, f_std, self.label], axis=1)
+            features = np.append(features, f_final, axis=0)
+        return features[1:, :]
+
+""" 
+Instantaneous Velocity
+
+values = [[3.0,4],[6.0,9],[10.0,15]]
+velocities = []
+for pos, time in values:
+    velocity = float(pos/time)
+    velocities.append(velocity)
+
+print velocities
+
+
+def sampen(L, m, r):
+    N = len(L)
+    B = 0.0
+    A = 0.0
+    
+    
+    # Split time series and save all templates of length m
+    xmi = np.array([L[i : i + m] for i in range(N - m)])
+    xmj = np.array([L[i : i + m] for i in range(N - m + 1)])
+
+    # Save all matches minus the self-match, compute B
+    B = np.sum([np.sum(np.abs(xmii - xmj).max(axis=1) <= r) - 1 for xmii in xmi])
+
+    # Similar for computing A
+    m += 1
+    xm = np.array([L[i : i + m] for i in range(N - m + 1)])
+
+    A = np.sum([np.sum(np.abs(xmi - xm).max(axis=1) <= r) - 1 for xmi in xm])
+
+    # Return SampEn
+    return -np.log(A / B)
+
+
+
+"""
+
+
+# ------------- EXTRACT FEATURE FOR ALL 3 CLASSES --------------
+FE = FeatureExtraction(PATH, LIVE, np.array([[1]]))
+live_features = FE.extract()
+FE = FeatureExtraction(PATH, SAS_I, np.array([[0]]))
+sasi_features = FE.extract()
+FE = FeatureExtraction(PATH, SAS_II, np.array([[0]]))
+sasii_features = FE.extract()
+
+
+from sklearn.svm import SVC
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split, cross_val_score, ShuffleSplit
+from sklearn.metrics import accuracy_score
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.metrics import classification_report
+from sklearn.metrics import confusion_matrix
+from sklearn.metrics import accuracy_score
+from sklearn.neighbors import KNeighborsClassifier
+
+all_features = np.concatenate([live_features, sasii_features], axis=0)
+X = all_features[:, :-1]
+y = all_features[:, -1].astype(int)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.5, random_state=10)
+
+#clf = make_pipeline(StandardScaler(), SVC(gamma=2, C=100))
+clf = RandomForestClassifier()
+#Accuracy bad
+#clf = DecisionTreeClassifier()  
+#clf = KNeighborsClassifier(n_neighbors=5)
+cv = ShuffleSplit(n_splits=1000, test_size=0.5, random_state=10)
+scores = cross_val_score(clf, X, y, cv=cv) * 100
+print("AVERAGE ACCURACY: %0.1f%% (+/- %0.2f%%)" % (scores.mean(), scores.std() * 2))
+print("MAXIMUM ACCURACY: %0.1f%%" %(scores.max()))
+
